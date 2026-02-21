@@ -34,61 +34,76 @@ def forward_kinematics(theta1, theta2, base_x=0):
     return x1, y1, x2, y2
 
 # --------------------------------------------------
-# MODEL DEFINITIONS
+# SHARED MODEL (MATCHES TRAINING)
 # --------------------------------------------------
 
 class SharedBilateralNet(nn.Module):
     def __init__(self):
         super().__init__()
-        self.hidden = nn.Linear(2, 64)
+
+        self.sensory_cortex = nn.Linear(2, 64)
+        self.association_cortex = nn.Linear(64, 64)
+        self.motor_cortex = nn.Linear(64, 4)
+
         self.relu = nn.ReLU()
-        self.output = nn.Linear(64, 4)
 
     def forward(self, x, lesion_side=None, lesion_severity=0.0):
-        h = self.hidden(x)
 
-        # Simulate hemispheric lesion
+        s = self.relu(self.sensory_cortex(x))
+        a = self.relu(self.association_cortex(s))
+
+        # Lesion applied at association cortex
         if lesion_side == "Left":
-            h[:, :32] *= (1 - lesion_severity)
+            a[:, :32] *= (1 - lesion_severity)
         elif lesion_side == "Right":
-            h[:, 32:] *= (1 - lesion_severity)
+            a[:, 32:] *= (1 - lesion_severity)
 
-        h = self.relu(h)
-        return self.output(h)
+        out = self.motor_cortex(a)
+        return out
 
+# --------------------------------------------------
+# SPLIT MODEL (MATCHES TRAINING)
+# --------------------------------------------------
 
 class SplitBilateralNet(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.left_hidden = nn.Linear(2, 32)
-        self.right_hidden = nn.Linear(2, 32)
+        # Left hemisphere
+        self.left_sensory = nn.Linear(2, 32)
+        self.left_association = nn.Linear(32, 32)
+        self.left_motor = nn.Linear(32, 2)
 
-        self.left_out = nn.Linear(32, 2)
-        self.right_out = nn.Linear(32, 2)
+        # Right hemisphere
+        self.right_sensory = nn.Linear(2, 32)
+        self.right_association = nn.Linear(32, 32)
+        self.right_motor = nn.Linear(32, 2)
 
         self.relu = nn.ReLU()
 
     def forward(self, x, lesion_side=None, lesion_severity=0.0):
 
-        left_h = self.left_hidden(x)
-        right_h = self.right_hidden(x)
+        # Left pathway
+        ls = self.relu(self.left_sensory(x))
+        la = self.relu(self.left_association(ls))
 
+        # Right pathway
+        rs = self.relu(self.right_sensory(x))
+        ra = self.relu(self.right_association(rs))
+
+        # Apply lesion
         if lesion_side == "Left":
-            left_h *= (1 - lesion_severity)
+            la *= (1 - lesion_severity)
         elif lesion_side == "Right":
-            right_h *= (1 - lesion_severity)
+            ra *= (1 - lesion_severity)
 
-        left_h = self.relu(left_h)
-        right_h = self.relu(right_h)
-
-        left_out = self.left_out(left_h)
-        right_out = self.right_out(right_h)
+        left_out = self.left_motor(la)
+        right_out = self.right_motor(ra)
 
         return torch.cat([left_out, right_out], dim=1)
 
 # --------------------------------------------------
-# MODEL LOADING FUNCTION (SAFE)
+# SAFE MODEL LOADING
 # --------------------------------------------------
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -104,7 +119,7 @@ def load_model(model, filename):
         state_dict = torch.load(path, map_location=torch.device("cpu"))
         model.load_state_dict(state_dict)
     except Exception as e:
-        st.error("Model loading failed. Likely architecture mismatch.")
+        st.error("Model loading failed.")
         st.write("Error details:")
         st.write(e)
         st.stop()
@@ -116,7 +131,7 @@ def load_model(model, filename):
 # SIDEBAR CONTROLS
 # --------------------------------------------------
 
-st.sidebar.header("Controls")
+st.sidebar.header("🧠 Brain Controls")
 
 model_type = st.sidebar.radio(
     "Network Type",
@@ -147,7 +162,7 @@ if lesion_side == "None":
     lesion_side = None
 
 # --------------------------------------------------
-# INITIALIZE MODEL
+# LOAD CORRECT MODEL
 # --------------------------------------------------
 
 if model_type == "Shared Network":
@@ -183,12 +198,12 @@ ax.set_ylim(-2, 2)
 ax.set_aspect("equal")
 ax.grid(True, alpha=0.3)
 
-# Left Arm (base -1)
+# Left arm (base -1)
 lx1, ly1, lx2, ly2 = forward_kinematics(
     angles[0], angles[1], base_x=-1
 )
 
-# Right Arm (base +1)
+# Right arm (base +1)
 rx1, ry1, rx2, ry2 = forward_kinematics(
     angles[2], angles[3], base_x=1
 )
@@ -200,7 +215,7 @@ ax.plot([1, rx1, rx2], [0, ry1, ry2], linewidth=4)
 # Plot target
 ax.scatter(target_x, target_y, s=120, marker="x")
 
-ax.set_title("Bilateral Arm Movement")
+ax.set_title("Bilateral Arm Movement Simulation")
 
 st.pyplot(fig)
 
@@ -216,16 +231,15 @@ col1.metric("Left Arm Error", f"{left_error:.3f}")
 col2.metric("Right Arm Error", f"{right_error:.3f}")
 
 # --------------------------------------------------
-# EXPLANATION PANEL
+# EXPLANATION
 # --------------------------------------------------
 
 st.markdown("---")
-
 st.markdown("""
-### 🧠 What You're Seeing
+### 🧠 What You're Observing
 
-- **Shared Network:** Both arms depend on a common hidden representation.
-- **Split Network:** Each arm is controlled by a separate neural pathway.
-- **Stroke Severity:** Simulates damage by weakening hidden neurons.
-- Observe how different architectures respond to damage.
+- **Shared Network:** Both arms rely on a common association cortex.
+- **Split Network:** Each arm has its own independent cortical pathway.
+- **Stroke Severity:** Weakens neurons in one hemisphere.
+- Observe how architecture affects robustness and compensation.
 """)
