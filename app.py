@@ -5,137 +5,103 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 import os
 
-# --------------------------------------------------
-# PAGE CONFIG
-# --------------------------------------------------
-
-st.set_page_config(
-    page_title="Bilateral Motor Network",
-    layout="wide"
-)
-
+st.set_page_config(layout="wide")
 st.title("🧠 Bilateral Motor Network Simulator")
-st.markdown("Explore shared vs split neural control and simulate stroke lesions.")
 
-# --------------------------------------------------
-# ARM PARAMETERS
-# --------------------------------------------------
+# =====================================================
+# MODEL DEFINITIONS (EXACT MATCH TO TRAINING)
+# =====================================================
 
-L1 = 1.0
-L2 = 1.0
-
-def forward_kinematics(theta1, theta2, base_x=0):
-    x1 = base_x + L1 * np.cos(theta1)
-    y1 = L1 * np.sin(theta1)
-
-    x2 = x1 + L2 * np.cos(theta1 + theta2)
-    y2 = y1 + L2 * np.sin(theta1 + theta2)
-
-    return x1, y1, x2, y2
-
-# --------------------------------------------------
-# SHARED MODEL (MATCHES TRAINING)
-# --------------------------------------------------
-
-class SharedBilateralNet(nn.Module):
-    def __init__(self):
+class SimpleIntegratedBrain(nn.Module):
+    def __init__(self, input_dim=8, hidden_dim=64, output_dim=12):
         super().__init__()
 
-        self.sensory_cortex = nn.Linear(2, 64)
-        self.association_cortex = nn.Linear(64, 64)
-        self.motor_cortex = nn.Linear(64, 4)
+        self.sensory_cortex = nn.Linear(input_dim, hidden_dim)
+        self.association_cortex = nn.Linear(hidden_dim, hidden_dim)
+        self.motor_cortex = nn.Linear(hidden_dim, output_dim)
 
-        self.relu = nn.ReLU()
+        self.act = nn.ReLU()
+        self.tanh = nn.Tanh()
 
     def forward(self, x, lesion_side=None, lesion_severity=0.0):
 
-        s = self.relu(self.sensory_cortex(x))
-        a = self.relu(self.association_cortex(s))
+        h1 = self.act(self.sensory_cortex(x))
+        h2 = self.act(self.association_cortex(h1))
 
-        # Lesion applied at association cortex
+        # Lesion at association cortex
         if lesion_side == "Left":
-            a[:, :32] *= (1 - lesion_severity)
+            h2[:, :32] *= (1 - lesion_severity)
         elif lesion_side == "Right":
-            a[:, 32:] *= (1 - lesion_severity)
+            h2[:, 32:] *= (1 - lesion_severity)
 
-        out = self.motor_cortex(a)
-        return out
+        return self.tanh(self.motor_cortex(h2))
 
-# --------------------------------------------------
-# SPLIT MODEL (MATCHES TRAINING)
-# --------------------------------------------------
 
-class SplitBilateralNet(nn.Module):
-    def __init__(self):
+class BilateralSplitBrain(nn.Module):
+    def __init__(self, hidden_dim=64):
         super().__init__()
 
-        # Left hemisphere
-        self.left_sensory = nn.Linear(2, 32)
-        self.left_association = nn.Linear(32, 32)
-        self.left_motor = nn.Linear(32, 2)
+        half_dim = int(hidden_dim / 2)
 
-        # Right hemisphere
-        self.right_sensory = nn.Linear(2, 32)
-        self.right_association = nn.Linear(32, 32)
-        self.right_motor = nn.Linear(32, 2)
+        self.encoder_left = nn.Linear(4, half_dim)
+        self.encoder_right = nn.Linear(4, half_dim)
 
-        self.relu = nn.ReLU()
+        self.shared_layer1 = nn.Linear(hidden_dim, hidden_dim)
+        self.shared_layer2 = nn.Linear(hidden_dim, hidden_dim)
+
+        self.motor_left = nn.Linear(hidden_dim, 6)
+        self.motor_right = nn.Linear(hidden_dim, 6)
+
+        self.act = nn.ReLU()
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x, lesion_side=None, lesion_severity=0.0):
 
-        # Left pathway
-        ls = self.relu(self.left_sensory(x))
-        la = self.relu(self.left_association(ls))
+        input_L = x[:, 0:4]
+        input_R = x[:, 4:8]
 
-        # Right pathway
-        rs = self.relu(self.right_sensory(x))
-        ra = self.relu(self.right_association(rs))
+        h_L = self.act(self.encoder_left(input_L))
+        h_R = self.act(self.encoder_right(input_R))
 
-        # Apply lesion
+        h_combined = torch.cat([h_L, h_R], dim=1)
+
+        h_shared = self.act(self.shared_layer1(h_combined))
+        h_shared = self.act(self.shared_layer2(h_shared))
+
+        # Lesion at shared integration area
         if lesion_side == "Left":
-            la *= (1 - lesion_severity)
+            h_shared[:, :32] *= (1 - lesion_severity)
         elif lesion_side == "Right":
-            ra *= (1 - lesion_severity)
+            h_shared[:, 32:] *= (1 - lesion_severity)
 
-        left_out = self.left_motor(la)
-        right_out = self.right_motor(ra)
+        out_L = self.sigmoid(self.motor_left(h_shared))
+        out_R = self.sigmoid(self.motor_right(h_shared))
 
-        return torch.cat([left_out, right_out], dim=1)
+        return torch.cat([out_L, out_R], dim=1)
 
-# --------------------------------------------------
-# SAFE MODEL LOADING
-# --------------------------------------------------
+# =====================================================
+# SAFE LOADING
+# =====================================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def load_model(model, filename):
     path = os.path.join(BASE_DIR, filename)
 
-    if not os.path.exists(path):
-        st.error(f"Model file not found: {filename}")
-        st.stop()
-
-    try:
-        state_dict = torch.load(path, map_location=torch.device("cpu"))
-        model.load_state_dict(state_dict)
-    except Exception as e:
-        st.error("Model loading failed.")
-        st.write("Error details:")
-        st.write(e)
-        st.stop()
-
+    state_dict = torch.load(path, map_location=torch.device("cpu"))
+    model.load_state_dict(state_dict)
     model.eval()
     return model
 
-# --------------------------------------------------
-# SIDEBAR CONTROLS
-# --------------------------------------------------
+# =====================================================
+# SIDEBAR
+# =====================================================
 
 st.sidebar.header("🧠 Brain Controls")
 
 model_type = st.sidebar.radio(
     "Network Type",
-    ["Shared Network", "Split Network"]
+    ["Shared (Integrated Brain)", "Split (Bilateral Brain)"]
 )
 
 lesion_side = st.sidebar.selectbox(
@@ -143,103 +109,77 @@ lesion_side = st.sidebar.selectbox(
     ["None", "Left", "Right"]
 )
 
-lesion_severity = st.sidebar.slider(
+severity = st.sidebar.slider(
     "Stroke Severity",
     0.0, 1.0, 0.0, 0.01
-)
-
-target_x = st.sidebar.slider(
-    "Target X",
-    -1.5, 1.5, 0.5, 0.01
-)
-
-target_y = st.sidebar.slider(
-    "Target Y",
-    -1.5, 1.5, 0.5, 0.01
 )
 
 if lesion_side == "None":
     lesion_side = None
 
-# --------------------------------------------------
-# LOAD CORRECT MODEL
-# --------------------------------------------------
+# =====================================================
+# LOAD MODEL
+# =====================================================
 
-if model_type == "Shared Network":
-    model = SharedBilateralNet()
-    model = load_model(model, "shared_model.pth")
+if model_type.startswith("Shared"):
+    model = load_model(SimpleIntegratedBrain(), "shared_model.pth")
 else:
-    model = SplitBilateralNet()
-    model = load_model(model, "split_model.pth")
+    model = load_model(BilateralSplitBrain(), "split_model.pth")
 
-# --------------------------------------------------
+# =====================================================
+# FAKE DEMO INPUT (since real dataset not loaded)
+# =====================================================
+
+st.sidebar.markdown("### Target Inputs")
+
+left_x = st.sidebar.slider("Left Target X", -1.0, 1.0, 0.5)
+left_y = st.sidebar.slider("Left Target Y", -1.0, 1.0, 0.5)
+left_z = st.sidebar.slider("Left Target Z", -1.0, 1.0, 0.5)
+left_reach = st.sidebar.slider("Left Reach", 0.0, 1.0, 0.5)
+
+right_x = st.sidebar.slider("Right Target X", -1.0, 1.0, 0.5)
+right_y = st.sidebar.slider("Right Target Y", -1.0, 1.0, 0.5)
+right_z = st.sidebar.slider("Right Target Z", -1.0, 1.0, 0.5)
+right_reach = st.sidebar.slider("Right Reach", 0.0, 1.0, 0.5)
+
+input_tensor = torch.tensor([[
+    left_x, left_y, left_z, left_reach,
+    right_x, right_y, right_z, right_reach
+]], dtype=torch.float32)
+
+# =====================================================
 # INFERENCE
-# --------------------------------------------------
-
-input_tensor = torch.tensor([[target_x, target_y]], dtype=torch.float32)
+# =====================================================
 
 with torch.no_grad():
-    angles = model(
-        input_tensor,
-        lesion_side=lesion_side,
-        lesion_severity=lesion_severity
-    )
+    output = model(input_tensor, lesion_side, severity)
 
-angles = angles.numpy()[0]
+output = output.numpy()[0]
 
-# --------------------------------------------------
-# VISUALIZATION
-# --------------------------------------------------
+# =====================================================
+# DISPLAY OUTPUT
+# =====================================================
 
-fig, ax = plt.subplots(figsize=(6, 6))
-
-ax.set_xlim(-3, 3)
-ax.set_ylim(-2, 2)
-ax.set_aspect("equal")
-ax.grid(True, alpha=0.3)
-
-# Left arm (base -1)
-lx1, ly1, lx2, ly2 = forward_kinematics(
-    angles[0], angles[1], base_x=-1
-)
-
-# Right arm (base +1)
-rx1, ry1, rx2, ry2 = forward_kinematics(
-    angles[2], angles[3], base_x=1
-)
-
-# Plot arms
-ax.plot([-1, lx1, lx2], [0, ly1, ly2], linewidth=4)
-ax.plot([1, rx1, rx2], [0, ry1, ry2], linewidth=4)
-
-# Plot target
-ax.scatter(target_x, target_y, s=120, marker="x")
-
-ax.set_title("Bilateral Arm Movement Simulation")
-
-st.pyplot(fig)
-
-# --------------------------------------------------
-# ERROR METRICS
-# --------------------------------------------------
-
-left_error = np.sqrt((lx2 - target_x)**2 + (ly2 - target_y)**2)
-right_error = np.sqrt((rx2 - target_x)**2 + (ry2 - target_y)**2)
+st.subheader("💪 Muscle Activations (12 Outputs)")
 
 col1, col2 = st.columns(2)
-col1.metric("Left Arm Error", f"{left_error:.3f}")
-col2.metric("Right Arm Error", f"{right_error:.3f}")
 
-# --------------------------------------------------
-# EXPLANATION
-# --------------------------------------------------
+with col1:
+    st.markdown("### Left Arm Muscles")
+    for i in range(6):
+        st.metric(f"Muscle L{i+1}", f"{output[i]:.3f}")
+
+with col2:
+    st.markdown("### Right Arm Muscles")
+    for i in range(6):
+        st.metric(f"Muscle R{i+1}", f"{output[i+6]:.3f}")
 
 st.markdown("---")
 st.markdown("""
-### 🧠 What You're Observing
+### 🧠 What You Are Seeing
 
-- **Shared Network:** Both arms rely on a common association cortex.
-- **Split Network:** Each arm has its own independent cortical pathway.
-- **Stroke Severity:** Weakens neurons in one hemisphere.
-- Observe how architecture affects robustness and compensation.
+- **Shared Brain:** One integrated sensory → association → motor pathway.
+- **Split Brain:** Separate encoders + shared integration + separate motor heads.
+- Stroke weakens half of the shared integration space.
+- Watch how muscle activation patterns degrade differently.
 """)
